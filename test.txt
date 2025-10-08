@@ -1,0 +1,4 @@
+"C:\Program Files\OpenSSL-Win64\bin\openssl.exe" s_client ^
+  -connect 127.0.0.1:4222 ^
+  -cert client-cert.pem -key client.key.pem ^
+  -CAfile truststore.pem
