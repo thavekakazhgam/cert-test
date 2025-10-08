@@ -1,0 +1,143 @@
+C:\Windows\System32>cd /d D:\BroadcastBus\certificates
+
+D:\BroadcastBus\certificates>gen-nats-mtls.cmd "D:\BroadcastBus\certificates" "localhost" "changeit" "C:\Program Files\OpenSSL-Win64\bin\openssl.exe"
+
+ =========================
+
+@echo off
+setlocal enabledelayedexpansion
+
+rem =========================
+rem Args: OUTDIR DNSNAME PFXPASS OPENSSL_EXE(optional)
+rem =========================
+set "OUTDIR=%~1"
+if "%OUTDIR%"=="" set "OUTDIR=%CD%"
+
+set "DNS=%~2"
+if "%DNS%"=="" set "DNS=localhost"
+
+set "PFXPASS=%~3"
+if "%PFXPASS%"=="" set "PFXPASS=changeit"
+
+set "OPENSSL=%~4"
+
+if not defined OPENSSL (
+  where openssl >nul 2>&1
+  if not errorlevel 1 (
+    for /f "delims=" %%A in ('where openssl') do set "OPENSSL=%%~fA"
+  )
+)
+
+if not defined OPENSSL set "OPENSSL=C:\Program Files\OpenSSL-Win64\bin\openssl.exe"
+if not exist "%OPENSSL%" (
+  echo ERROR: openssl.exe not found. Specify the 4th argument with full path.
+  exit /b 1
+)
+
+if not exist "%OUTDIR%" mkdir "%OUTDIR%"
+pushd "%OUTDIR%"
+
+set "OPENSSL_CONF="
+set "RANDFILE=%OUTDIR%\.rnd"
+
+rem =========================
+rem Config files
+rem =========================
+>ca.cnf (
+  echo [ req ]
+  echo prompt = no
+  echo default_md = sha256
+  echo distinguished_name = dn
+  echo x509_extensions = v3_ca
+  echo.
+  echo [ dn ]
+  echo CN = StandaloneBus Dev CA
+  echo.
+  echo [ v3_ca ]
+  echo basicConstraints = critical,CA:TRUE,pathlen:0
+  echo keyUsage = critical,keyCertSign,cRLSign
+  echo subjectKeyIdentifier = hash
+)
+
+if /I "%DNS%"=="localhost" (
+  set "SANLINE=subjectAltName = DNS:%DNS%, IP:127.0.0.1"
+) else (
+  set "SANLINE=subjectAltName = DNS:%DNS%, DNS:localhost, IP:127.0.0.1"
+)
+
+>server.cnf (
+  echo [ req ]
+  echo default_bits = 2048
+  echo prompt = no
+  echo default_md = sha256
+  echo req_extensions = req_ext
+  echo distinguished_name = dn
+  echo.
+  echo [ dn ]
+  echo CN = %DNS%
+  echo.
+  echo [ req_ext ]
+  echo %SANLINE%
+  echo keyUsage = digitalSignature, keyEncipherment
+  echo extendedKeyUsage = serverAuth
+  echo basicConstraints = critical,CA:FALSE
+)
+
+>client.cnf (
+  echo [ req ]
+  echo default_bits = 2048
+  echo prompt = no
+  echo default_md = sha256
+  echo req_extensions = req_ext
+  echo distinguished_name = dn
+  echo.
+  echo [ dn ]
+  echo CN = client
+  echo.
+  echo [ req_ext ]
+  echo keyUsage = digitalSignature, keyEncipherment
+  echo extendedKeyUsage = clientAuth
+  echo basicConstraints = critical,CA:FALSE
+)
+
+rem =========================
+rem 1) CA
+rem =========================
+echo Creating CA...
+"%OPENSSL%" req -x509 -newkey rsa:2048 -nodes -days 1825 -sha256 -config ca.cnf -keyout ca.key.pem -out truststore.pem || goto :fail
+"%OPENSSL%" x509 -in truststore.pem -outform der -out truststore.cer || goto :fail
+
+rem =========================
+rem 2) Server
+rem =========================
+echo Creating server cert...
+"%OPENSSL%" genrsa -out server.key.pem 2048 || goto :fail
+"%OPENSSL%" req -new -key server.key.pem -out server.csr -config server.cnf || goto :fail
+"%OPENSSL%" x509 -req -in server.csr -CA truststore.pem -CAkey ca.key.pem -CAcreateserial -CAserial ca.srl -out server-cert.pem -days 825 -sha256 -extfile server.cnf -extensions req_ext || goto :fail
+"%OPENSSL%" pkcs8 -topk8 -nocrypt -in server.key.pem -out server-key.pem || goto :fail
+
+rem =========================
+rem 3) Client
+rem =========================
+echo Creating client cert...
+"%OPENSSL%" genrsa -out client.key.pem 2048 || goto :fail
+"%OPENSSL%" req -new -key client.key.pem -out client.csr -config client.cnf || goto :fail
+"%OPENSSL%" x509 -req -in client.csr -CA truststore.pem -CAkey ca.key.pem -CAcreateserial -CAserial ca.srl -out client-cert.pem -days 825 -sha256 -extfile client.cnf -extensions req_ext || goto :fail
+"%OPENSSL%" pkcs12 -export -out client.pfx -inkey client.key.pem -in client-cert.pem -certfile truststore.pem -passout pass:%PFXPASS% -name "StandaloneBus Client" || goto :fail
+
+echo.
+echo Created files in %OUTDIR%:
+echo   - truststore.pem
+echo   - server-cert.pem
+echo   - server-key.pem
+echo   - client.pfx
+echo.
+echo Done.
+popd
+exit /b 0
+
+:fail
+echo.
+echo ERROR: OpenSSL failed. See the command output above for the exact reason.
+popd
+exit /b 1
